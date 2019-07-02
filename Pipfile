@@ -1,0 +1,16 @@
+[[source]]
+name = "pypi"
+url = "https://pypi.org/simple"
+verify_ssl = true
+
+[dev-packages]
+sqlalchemy = "*"
+
+[packages]
+"airflow-postgres-plugin" = {editable = true, path = ".", extras = ["tests", "dev", "docs"]}
+
+[requires]
+python_version = "3.7"
+
+[pipenv]
+allow_prereleases = true
