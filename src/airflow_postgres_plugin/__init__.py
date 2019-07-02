@@ -2,5 +2,5 @@
 # Copyright (c) 2019 Dan Ryan
 # MIT License <https://opensource.org/licenses/mit>
 
-__version__ = "0.0.2"
+__version__ = "0.0.3"
 __all__ = ["__version__"]
