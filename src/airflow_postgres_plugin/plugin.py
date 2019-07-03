@@ -3,8 +3,8 @@ from typing import List
 
 from airflow.plugins_manager import AirflowPlugin
 
-from .hooks import PostgresHook
-from .operators import (
+from airflow_postgres_plugin.hooks.postgres_hook import PostgresHook
+from airflow_postgres_plugin.operators import (
     FileToPostgresTableOperator,
     PandasToPostgresTableOperator,
     PostgresTableToFileOperator,
