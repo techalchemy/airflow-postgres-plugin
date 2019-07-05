@@ -1,6 +1,7 @@
 # -*- coding=utf-8 -*-
 import concurrent.futures
 import contextlib
+import csv
 import hashlib
 import os
 import tempfile
@@ -17,7 +18,7 @@ from airflow_postgres_plugin.hooks.postgres_hook import PostgresHook
 
 class PandasToPostgresBulkOperator(BaseOperator):
 
-    template_fields = ("filepaths", "schema", "compression")
+    template_fields = ("filepaths", "schema", "compression", "templates_dict")
 
     @apply_defaults
     def __init__(
@@ -25,22 +26,26 @@ class PandasToPostgresBulkOperator(BaseOperator):
         conn_id: str,
         filepaths: str,
         schema: str = "public",
-        sep: str = None,
+        sep: str = ",",
         compression: str = "infer",
         chunksize: int = 10000,
+        templates_dict: Dict[str, str] = None,
         max_connections: int = 10,
+        quoting: int = csv.QUOTE_MINIMAL,
         s3_conn_id: str = None,
         *args,
         **kwargs,
     ):
         super(PandasToPostgresBulkOperator, self).__init__(*args, **kwargs)
         self.conn_id = conn_id
+        self.filepaths = filepaths
         self.schema = schema
         self.sep = sep
         self.compression = compression
         self.chunksize = chunksize
-        self.schema = schema
+        self.templates_dict = templates_dict
         self.s3_conn_id = s3_conn_id
+        self.quoting = quoting
         self._s3_hook: Optional[S3Hook] = None
         self._hook: Optional[PostgresHook] = None
 
@@ -58,7 +63,7 @@ class PandasToPostgresBulkOperator(BaseOperator):
     @property
     def s3_hook(self) -> S3Hook:
         if self._s3_hook is None:
-            self._s3_hook = S3Hook(self.s3_conn_id)
+            self._s3_hook = S3Hook(self.s3_conn_id, verify=False)
         assert self._s3_hook is not None
         return self._s3_hook
 
@@ -75,6 +80,7 @@ class PandasToPostgresBulkOperator(BaseOperator):
 
     def _load_file(self, filename: str):
         table, _, _ = os.path.basename(filename).rpartition(".csv")
+        assert table == filename.rsplit(os.extsep, 2)[0]
         self.log.info(
             f"importing csv data from file: {filename} -> {table} on {self.hook!r}"
         )
@@ -86,6 +92,8 @@ class PandasToPostgresBulkOperator(BaseOperator):
                 compression=self.compression,
                 chunksize=self.chunksize,
                 filepath=filename,
+                quoting=self.quoting,
+                templates_dict=self.templates_dict,
             )
         except Exception as exc:
             raise AirflowException(f"Failed to load table with exception: {exc!r}")

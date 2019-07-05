@@ -1,5 +1,6 @@
 # -*- coding=utf-8 -*-
 import contextlib
+import csv
 import hashlib
 import os
 import tempfile
@@ -16,7 +17,7 @@ from airflow_postgres_plugin.hooks.postgres_hook import PostgresHook
 
 class PandasToPostgresTableOperator(BaseOperator):
 
-    template_fields = ("table", "filepath", "schema", "compression")
+    template_fields = ("table", "filepath", "schema", "compression", "templates_dict")
 
     @apply_defaults
     def __init__(
@@ -24,10 +25,12 @@ class PandasToPostgresTableOperator(BaseOperator):
         conn_id: str,
         table: str,
         schema: str = "public",
-        sep: str = None,
+        sep: str = ",",
         compression: str = "infer",
         chunksize: int = 10000,
+        templates_dict: Dict[str, str] = None,
         filepath: Union[IO, str] = None,
+        quoting: int = csv.QUOTE_MINIMAL,
         s3_conn_id: str = None,
         *args,
         **kwargs,
@@ -39,6 +42,8 @@ class PandasToPostgresTableOperator(BaseOperator):
         self.sep = sep
         self.compression = compression
         self.chunksize = chunksize
+        self.quoting = quoting
+        self.templates_dict = templates_dict
         self.filepath = filepath
         self.schema = schema
         self.s3_conn_id = s3_conn_id
@@ -59,7 +64,7 @@ class PandasToPostgresTableOperator(BaseOperator):
     @property
     def s3_hook(self) -> S3Hook:
         if self._s3_hook is None:
-            self._s3_hook = S3Hook(self.s3_conn_id)
+            self._s3_hook = S3Hook(self.s3_conn_id, verify=False)
         assert self._s3_hook is not None
         return self._s3_hook
 
@@ -92,6 +97,8 @@ class PandasToPostgresTableOperator(BaseOperator):
                     compression=self.compression,
                     chunksize=self.chunksize,
                     filepath=self.filepath,
+                    quoting=self.quoting,
+                    templates_dict=self.templates_dict,
                 )
             except Exception as exc:
                 raise AirflowException(f"Failed to load table with exception: {exc!r}")
