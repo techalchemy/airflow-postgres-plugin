@@ -17,7 +17,7 @@ import sqlalchemy
 from airflow.exceptions import AirflowException
 from airflow.hooks.dbapi_hook import DbApiHook
 from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import scoped_session, sessionmaker
 from sqlalchemy.orm.session import Session
 from sqlalchemy.schema import MetaData
 
@@ -31,39 +31,34 @@ class PostgresHook(DbApiHook):
     supports_autocommit: bool = True
 
     def __init__(
-        self,
-        postgres_conn_id: str,
-        database: str = None,
-        schema: str = None,
-        connection: str = None,
-        *args,
-        **kwargs,
+        self, postgres_conn_id: str, database: str = None, schema: str = None
     ) -> None:
-        super(PostgresHook, self).__init__(*args, **kwargs)
+        super(PostgresHook, self).__init__()
         self.postgres_conn_id = postgres_conn_id
         self.database = database
         self.schema = schema
-        self._connection: TBasic = connection
-        self.connection = self.get_connection(postgres_conn_id)
 
     @staticmethod
     def _serialize_cell(cell, conn):
         return cell
 
     def get_conn(self) -> psycopg2._psycopg.connection:
+        connection = self.get_connection(self.postgres_conn_id)
+        if connection.schema and not self.schema:
+            self.schema = connection.schema
         connection_args: Dict[str, TBasic]
         connection_args = {
-            "host": self.connection.host,
-            "user": self.connection.login,
-            "password": self.connection.password,
-            "dbname": self.database or self.connection.schema,
-            "port": self.connection.port,
+            "host": connection.host,
+            "user": connection.login,
+            "password": connection.password,
+            "dbname": self.database or self.schema or connection.schema,
+            "port": connection.port,
         }
+        schema = next(iter([schema for schema in [self.schema, connection.schema]]), None)
+        if isinstance(schema, str):
+            connection_args["options"] = f"-c search_path={schema}"
 
-        if isinstance(self.schema, str):
-            connection_args["options"] = f"-c search_path={self.schema}"
-
-        for (key, value) in self.connection.extra_dejson.items():
+        for (key, value) in connection.extra_dejson.items():
             if key in (
                 "sslmode",
                 "sslcert",
@@ -75,13 +70,13 @@ class PostgresHook(DbApiHook):
             ):
                 connection_args[key] = value
 
-        self.log.info(f"establishing connection to postgres at {self.connection.host!r}")
+        self.log.info(f"establishing connection to postgres at {connection.host!r}")
         return psycopg2.connect(**connection_args)
 
     def get_sqlalchemy_sessionmaker(self) -> Type[Session]:
         engine: sqlalchemy.engine.Engine = self.get_sqlalchemy_engine()
         self.log.info(f"buliding sqlalchemy sessionmaker instance with engine {engine!r}")
-        return sessionmaker(bind=engine)
+        return scoped_session(sessionmaker(bind=engine, expire_on_commit=False))
 
     def get_sqlalchemy_session(self) -> Session:
         self.log.info(f"building sqlalchemy session")
@@ -90,7 +85,7 @@ class PostgresHook(DbApiHook):
     def get_sqlalchemy_metadata(self, schema: str = None) -> MetaData:
         engine = self.get_sqlalchemy_engine()
         if not schema:
-            schema = self.schema or self.connection.schema
+            schema = self.schema
         self.log.info(
             f"building sqlalchemy metadata with engine {engine!r} "
             f"with schema {schema!r}"
@@ -351,7 +346,7 @@ class PostgresHook(DbApiHook):
         }
         try:
             for df in self.stream_csv_to_df(filepath, **df_stream_kwargs):
-                self.load_df(
+                self.load_df(  # type: ignore
                     df,
                     table=temp_table.name,
                     engine=engine,
@@ -423,3 +418,37 @@ class PostgresHook(DbApiHook):
                 if result is not None:
                     writer.writerow(result)
         return filepath
+
+    def copy_expert(self, sql, filename, open=open):
+        """
+        Executes SQL using psycopg2 copy_expert method.
+        Necessary to execute COPY command without access to a superuser.
+
+        Note: if this method is called with a "COPY FROM" statement and
+        the specified input file does not exist, it creates an empty
+        file and no data is loaded, but the operation succeeds.
+        So if users want to be aware when the input file does not exist,
+        they have to check its existence by themselves.
+        """
+        if not os.path.isfile(filename):
+            with open(filename, "w"):
+                pass
+
+        with open(filename, "r+") as f:
+            with contextlib.closing(self.get_conn()) as conn:
+                with contextlib.closing(conn.cursor()) as cur:
+                    cur.copy_expert(sql, f)
+                    f.truncate(f.tell())
+                    conn.commit()
+
+    def bulk_load(self, table, tmp_file):
+        """
+        Loads a tab-delimited file into a database table
+        """
+        self.copy_expert("COPY {table} FROM STDIN".format(table=table), tmp_file)
+
+    def bulk_dump(self, table, tmp_file):
+        """
+        Dumps a database table into a tab-delimited file
+        """
+        self.copy_expert("COPY {table} TO STDOUT".format(table=table), tmp_file)

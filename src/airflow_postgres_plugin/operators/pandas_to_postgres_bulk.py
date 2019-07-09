@@ -32,6 +32,7 @@ class PandasToPostgresBulkOperator(BaseOperator):
         templates_dict: Dict[str, str] = None,
         max_connections: int = 10,
         quoting: int = csv.QUOTE_MINIMAL,
+        include_index: bool = False,
         s3_conn_id: str = None,
         *args,
         **kwargs,
@@ -46,6 +47,7 @@ class PandasToPostgresBulkOperator(BaseOperator):
         self.templates_dict = templates_dict
         self.s3_conn_id = s3_conn_id
         self.quoting = quoting
+        self.include_index = include_index
         self._s3_hook: Optional[S3Hook] = None
         self._hook: Optional[PostgresHook] = None
 
@@ -94,6 +96,7 @@ class PandasToPostgresBulkOperator(BaseOperator):
                 filepath=filename,
                 quoting=self.quoting,
                 templates_dict=self.templates_dict,
+                include_index=self.include_index,
             )
         except Exception as exc:
             raise AirflowException(f"Failed to load table with exception: {exc!r}")

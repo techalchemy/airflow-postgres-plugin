@@ -32,6 +32,7 @@ class PandasToPostgresTableOperator(BaseOperator):
         filepath: Union[IO, str] = None,
         quoting: int = csv.QUOTE_MINIMAL,
         s3_conn_id: str = None,
+        include_index: bool = False,
         *args,
         **kwargs,
     ):
@@ -47,6 +48,7 @@ class PandasToPostgresTableOperator(BaseOperator):
         self.filepath = filepath
         self.schema = schema
         self.s3_conn_id = s3_conn_id
+        self.include_index = include_index
         self._s3_hook: Optional[S3Hook] = None
         self._hook: Optional[PostgresHook] = None
 
@@ -99,6 +101,7 @@ class PandasToPostgresTableOperator(BaseOperator):
                     filepath=self.filepath,
                     quoting=self.quoting,
                     templates_dict=self.templates_dict,
+                    include_index=self.include_index,
                 )
             except Exception as exc:
                 raise AirflowException(f"Failed to load table with exception: {exc!r}")
