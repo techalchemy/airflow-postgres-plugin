@@ -16,8 +16,16 @@ class PostgresTableToFileOperator(BaseOperator):
     template_fields = ("table", "filepath", "schema")
 
     @apply_defaults
-    def __init__(self, conn_id: str, table: str, filepath: str, schema: str = "public"):
-        super(PostgresTableToFileOperator, self).__init__()
+    def __init__(
+        self,
+        conn_id: str,
+        table: str,
+        filepath: str,
+        schema: str = "public",
+        *args,
+        **kwargs,
+    ):
+        super(PostgresTableToFileOperator, self).__init__(*args, **kwargs)
         self.conn_id = conn_id
         self.table = table
         self.filepath = filepath

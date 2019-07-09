@@ -33,8 +33,10 @@ class PandasToPostgresTableOperator(BaseOperator):
         quoting: int = csv.QUOTE_MINIMAL,
         s3_conn_id: str = None,
         include_index: bool = False,
+        *args,
+        **kwargs,
     ):
-        super(PandasToPostgresTableOperator, self).__init__()
+        super(PandasToPostgresTableOperator, self).__init__(*args, **kwargs)
         self.conn_id = conn_id
         self.table = table
         self.schema = schema
