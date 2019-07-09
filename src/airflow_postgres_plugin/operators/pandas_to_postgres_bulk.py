@@ -34,10 +34,8 @@ class PandasToPostgresBulkOperator(BaseOperator):
         quoting: int = csv.QUOTE_MINIMAL,
         include_index: bool = False,
         s3_conn_id: str = None,
-        *args,
-        **kwargs,
     ):
-        super(PandasToPostgresBulkOperator, self).__init__(*args, **kwargs)
+        super(PandasToPostgresBulkOperator, self).__init__()
         self.conn_id = conn_id
         self.filepaths = filepaths
         self.schema = schema

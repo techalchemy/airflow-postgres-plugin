@@ -24,10 +24,8 @@ class FileToPostgresTableOperator(BaseOperator):
         filepath: str,
         schema: str = "public",
         temp_table: bool = True,
-        *args,
-        **kwargs,
     ):
-        super(FileToPostgresTableOperator, self).__init__(*args, **kwargs)
+        super(FileToPostgresTableOperator, self).__init__()
         self.conn_id = conn_id
         self.table = table
         self.filepath = filepath

@@ -18,16 +18,9 @@ class PostgresToFileOperator(BaseOperator):
 
     @apply_defaults
     def __init__(
-        self,
-        conn_id: str,
-        sql: str,
-        sql_args: str,
-        filepath: str,
-        schema: str = "public",
-        *args,
-        **kwargs,
+        self, conn_id: str, sql: str, sql_args: str, filepath: str, schema: str = "public"
     ):
-        super(PostgresToFileOperator, self).__init__(*args, **kwargs)
+        super(PostgresToFileOperator, self).__init__()
         self.conn_id = conn_id
         self.sql = sql
         self.sql_args = sql_args
