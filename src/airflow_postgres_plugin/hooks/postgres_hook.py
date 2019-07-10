@@ -1,5 +1,6 @@
 # -*- coding=utf-8 -*-
 
+import atexit
 import contextlib
 import csv
 import datetime
@@ -35,12 +36,22 @@ class PostgresHook(DbApiHook):
     ) -> None:
         super(PostgresHook, self).__init__()
         self.postgres_conn_id = postgres_conn_id
+        self._engine: sqlalchemy.engine.Engine = None
         self.database = database
         self.schema = schema
 
     @staticmethod
     def _serialize_cell(cell, conn):
         return cell
+
+    @property
+    def engine(self):
+        if not self._engine:
+            self._engine = self.get_sqlalchemy_engine(
+                pool_pre_ping=True, pool_recycle=1800, pool_size=15
+            )
+            atexit.register(self._engine.dispose())
+        return self._engine
 
     def get_conn(self) -> psycopg2._psycopg.connection:
         connection = self.get_connection(self.postgres_conn_id)
@@ -74,23 +85,23 @@ class PostgresHook(DbApiHook):
         return psycopg2.connect(**connection_args)
 
     def get_sqlalchemy_sessionmaker(self) -> Type[Session]:
-        engine: sqlalchemy.engine.Engine = self.get_sqlalchemy_engine()
-        self.log.info(f"buliding sqlalchemy sessionmaker instance with engine {engine!r}")
-        return scoped_session(sessionmaker(bind=engine, expire_on_commit=False))
+        self.log.info(
+            f"buliding sqlalchemy sessionmaker instance with engine {self.engine!r}"
+        )
+        return scoped_session(sessionmaker(bind=self.engine, expire_on_commit=False))
 
     def get_sqlalchemy_session(self) -> Session:
         self.log.info(f"building sqlalchemy session")
         return self.get_sqlalchemy_sessionmaker()()
 
     def get_sqlalchemy_metadata(self, schema: str = None) -> MetaData:
-        engine = self.get_sqlalchemy_engine()
         if not schema:
             schema = self.schema
         self.log.info(
-            f"building sqlalchemy metadata with engine {engine!r} "
+            f"building sqlalchemy metadata with engine {self.engine!r} "
             f"with schema {schema!r}"
         )
-        return MetaData(bind=engine, schema=schema)
+        return MetaData(bind=self.engine, schema=schema)
 
     def get_sqlalchemy_table(self, name: str, schema: str = None) -> sqlalchemy.Table:
         self.log.info(f"getting introspected sqlalchemy table {name!r}")
@@ -98,22 +109,22 @@ class PostgresHook(DbApiHook):
             name,
             self.get_sqlalchemy_metadata(schema=schema),
             autoload=True,
-            autoload_with=self.get_sqlalchemy_engine(),
+            autoload_with=self.engine,
         )
 
     @contextlib.contextmanager
     def sqlalchemy_session(self) -> Generator[Session, None, None]:
-        session = self.get_sqlalchemy_session()
-        self.log.info(f"entering sqlalchemy session context with session {session!r}")
-        try:
-            yield session
-            session.commit()
-        except Exception as exc:
-            self.log.exception(f"exception occured during session {session!r}: {exc!r}")
-            session.rollback()
-        finally:
-            self.log.info(f"closing sqlalchemy session {session!r}")
-            session.close()
+        with contextlib.closing(self.get_sqlalchemy_session()) as session:
+            self.log.info(f"entering sqlalchemy session context with session {session!r}")
+            try:
+                yield session
+                if not self.get_autocommit(session):
+                    session.commit()
+            except Exception as exc:
+                self.log.exception(
+                    f"exception occured during session {session!r}: {exc!r}"
+                )
+                session.rollback()
 
     def duplicate_table_to_temp_table(
         self,
@@ -204,7 +215,7 @@ class PostgresHook(DbApiHook):
             postgres_copy.copy_from(
                 fp,
                 self.get_sqlalchemy_table(table),
-                self.get_sqlalchemy_engine(),
+                self.engine,
                 format="csv",
                 header=True,
                 columns=columns,
@@ -213,10 +224,8 @@ class PostgresHook(DbApiHook):
     def get_table_if_exists(
         self, table: str, schema: str = "public", engine: sqlalchemy.engine.Engine = None
     ) -> Optional[sqlalchemy.Table]:
-        if not engine:
-            engine = self.get_sqlalchemy_engine()
         self.log.info("checking database for destination table...")
-        if not engine.has_table(table, schema=schema):
+        if not self.engine.has_table(table, schema=schema):
             self.log.warn(f"no such table for loading data: {schema}.{table}")
             return None
         self.log.info(f"loading table {table!r}")
@@ -254,23 +263,25 @@ class PostgresHook(DbApiHook):
         schema: str = "public",
         chunksize: int = 10000,
         include_index: bool = False,
-        engine: sqlalchemy.engine.Engine = None,
+        engine: Optional[sqlalchemy.engine.Engine] = None,
+        conn: Optional[psycopg2.extensions.connection] = None,
         col_type_map: Dict[str, sqlalchemy.sql.type_api.TypeEngine] = None,
+        create_tables: bool = False,
     ) -> Optional[str]:
-        if not engine:
-            engine = self.get_sqlalchemy_engine()
         if not schema:
-            schema = self.schema or self.connection.schema
-        if not engine.has_table(table, schema=schema):
+            schema = self.schema
+        if not engine and not conn:
+            engine = self.engine
+        if engine and not create_tables and not engine.has_table(table, schema=schema):
             return None
         if not col_type_map:
             col_type_map = self.get_sqlalchemy_col_types(
-                table=self.get_table_if_exists(table, schema=schema, engine=engine),
+                table=self.get_table_if_exists(table, schema=schema, engine=self.engine),
                 exclude=["id"],
             )
         sql_args = {
             "name": table,
-            "con": engine,
+            "con": engine or conn,
             "schema": schema,
             "if_exists": "append",
             "chunksize": chunksize,
@@ -325,10 +336,10 @@ class PostgresHook(DbApiHook):
         quoting: int = csv.QUOTE_MINIMAL,
         include_index: bool = False,
         templates_dict: Dict[str, str] = None,
+        create_tables: bool = False,
     ) -> Optional[str]:
-        engine = self.get_sqlalchemy_engine()
-        target_table = self.get_table_if_exists(table, schema=schema, engine=engine)
-        if target_table is None:
+        target_table = self.get_table_if_exists(table, schema=schema, engine=self.engine)
+        if target_table is None and not create_tables:
             return None
         temp_table = self.duplicate_table_to_temp_table(table, schema=schema)
         col_type_map = self.get_sqlalchemy_col_types(temp_table, exclude=["id"])
@@ -344,20 +355,28 @@ class PostgresHook(DbApiHook):
             "include_index": include_index,
             "col_type_map": csv_python_types,
         }
-        try:
-            for df in self.stream_csv_to_df(filepath, **df_stream_kwargs):
-                self.load_df(  # type: ignore
-                    df,
-                    table=temp_table.name,
-                    engine=engine,
-                    chunksize=chunksize,
-                    include_index=include_index,
-                    schema=schema,
-                    col_type_map=col_type_map,
+        with contextlib.closing(self.get_conn()) as conn:
+            self.set_autocommit(conn, True)
+            try:
+                for df in self.stream_csv_to_df(filepath, **df_stream_kwargs):
+                    self.load_df(  # type: ignore
+                        df,
+                        table=temp_table.name,
+                        conn=conn,
+                        chunksize=chunksize,
+                        include_index=include_index,
+                        schema=schema,
+                        col_type_map=col_type_map,
+                        create_tables=create_tables,
+                    )
+            except Exception as exc:
+                raise AirflowException(
+                    f"Failed loading dataframes for table {table}:\n" f"{exc!r}"
                 )
-            self.upsert(temp_table, target_table, upsert_params=templates_dict)
-        finally:
-            temp_table.drop(engine)
+            else:
+                self.upsert(temp_table, target_table, upsert_params=templates_dict)
+            finally:
+                temp_table.drop(self.engine)
         return temp_table.name
 
     def dump(self, table: str, filepath: str) -> None:
@@ -367,7 +386,7 @@ class PostgresHook(DbApiHook):
                 postgres_copy.copy_to(
                     session.query(self.get_sqlalchemy_table(table)),
                     fp,
-                    self.get_sqlalchemy_engine(),
+                    self.engine,
                     format="csv",
                     header=True,
                 )
