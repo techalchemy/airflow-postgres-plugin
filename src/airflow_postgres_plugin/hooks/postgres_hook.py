@@ -48,7 +48,7 @@ class PostgresHook(DbApiHook):
     def engine(self):
         if not self._engine:
             self._engine = self.get_sqlalchemy_engine()
-            atexit.register(self._engine.dispose())
+            atexit.register(self._engine.dispose)
         return self._engine
 
     def get_conn(self) -> psycopg2._psycopg.connection:
