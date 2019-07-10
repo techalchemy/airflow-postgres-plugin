@@ -47,9 +47,7 @@ class PostgresHook(DbApiHook):
     @property
     def engine(self):
         if not self._engine:
-            self._engine = self.get_sqlalchemy_engine(
-                pool_pre_ping=True, pool_recycle=1800, pool_size=15
-            )
+            self._engine = self.get_sqlalchemy_engine()
             atexit.register(self._engine.dispose())
         return self._engine
 
