@@ -344,10 +344,11 @@ class PostgresHook(DbApiHook):
         target_table = self.get_table_if_exists(table, schema=schema, engine=self.engine)
         if target_table is None and not create_tables:
             return None
-        temp_table = self.duplicate_table_to_temp_table(table, schema=schema)
-        col_type_map = self.get_sqlalchemy_col_types(temp_table, exclude=["id"])
+        assert target_table is not None
+        # temp_table = self.duplicate_table_to_temp_table(table, schema=schema)
+        col_type_map = self.get_sqlalchemy_col_types(target_table, exclude=["id"])
         csv_python_types = self.get_sqlalchemy_table_python_types(
-            temp_table, exclude=["id"]
+            target_table, exclude=["id"]
         )
         df_stream_kwargs = {
             "schema": schema,
@@ -364,7 +365,7 @@ class PostgresHook(DbApiHook):
                 for df in self.stream_csv_to_df(filepath, **df_stream_kwargs):
                     self.load_df(  # type: ignore
                         df,
-                        table=temp_table.name,
+                        table=target_table.name,
                         conn=conn,
                         chunksize=chunksize,
                         include_index=include_index,
@@ -374,9 +375,9 @@ class PostgresHook(DbApiHook):
                     )
             except Exception as exc:
                 raise AirflowException(
-                    f"Failed loading dataframes for table {table}:\n" f"{exc!r}"
+                    f"Failed loading dataframes for table {target_table}:\n" f"{exc!r}"
                 )
-        return temp_table.name
+        return target_table.name
 
     def dump(self, table: str, filepath: str) -> None:
         self.log.info(f"dumping content of table {table!r} to {filepath!r}")
