@@ -33,6 +33,7 @@ class PandasToPostgresTableOperator(BaseOperator):
         quoting: int = csv.QUOTE_MINIMAL,
         s3_conn_id: str = None,
         include_index: bool = False,
+        temp_table: bool = False,
         *args,
         **kwargs,
     ):
@@ -49,6 +50,7 @@ class PandasToPostgresTableOperator(BaseOperator):
         self.schema = schema
         self.s3_conn_id = s3_conn_id
         self.include_index = include_index
+        self.temp_table = temp_table
         self._s3_hook: Optional[S3Hook] = None
         self._hook: Optional[PostgresHook] = None
 
@@ -83,6 +85,18 @@ class PandasToPostgresTableOperator(BaseOperator):
 
     def execute(self, context: Dict[str, Any]) -> Optional[str]:
         s3_key_id, s3_access_key = self._get_s3_credentials()
+        table = self.table
+        if self.temp_table:
+            try:
+                table = self.hook.duplicate_table_to_temp_table(
+                    table, include_constraints=False, schema=self.schema
+                ).name
+            except Exception as exc:
+                raise AirflowException(f"Failed creating temporary table: {exc!r}")
+            else:
+                self.log.debug(
+                    f"temporary table requested, created temporary table at {table}"
+                )
         with temp_environ():
             if s3_key_id is not None:
                 os.environ["AWS_ACCESS_KEY_ID"] = s3_key_id
@@ -93,7 +107,7 @@ class PandasToPostgresTableOperator(BaseOperator):
             )
             try:
                 self.hook.load_pandas(
-                    table=self.table,
+                    table=table,
                     schema=self.schema,
                     sep=self.sep,
                     compression=self.compression,
@@ -104,8 +118,8 @@ class PandasToPostgresTableOperator(BaseOperator):
                     include_index=self.include_index,
                 )
             except Exception as exc:
-                raise AirflowException(f"Failed to load table with exception: {exc!r}")
-        return self.table
+                self.log.error(f"Failed to load table with exception: {exc!r}")
+        return table
 
 
 @contextlib.contextmanager

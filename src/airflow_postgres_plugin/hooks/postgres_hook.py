@@ -53,17 +53,19 @@ class PostgresHook(DbApiHook):
 
     def get_conn(self) -> psycopg2._psycopg.connection:
         connection = self.get_connection(self.postgres_conn_id)
-        if connection.schema and not self.schema:
-            self.schema = connection.schema
+        if connection.schema and not self.database:
+            self.database = connection.schema
         connection_args: Dict[str, TBasic]
         connection_args = {
             "host": connection.host,
             "user": connection.login,
             "password": connection.password,
-            "dbname": self.database or self.schema or connection.schema,
+            "dbname": self.database or connection.schema,
             "port": connection.port,
         }
-        schema = next(iter([schema for schema in [self.schema, connection.schema]]), None)
+        schema = next(
+            iter([schema for schema in [self.database, connection.schema]]), None
+        )
         if isinstance(schema, str):
             connection_args["options"] = f"-c search_path={schema}"
 
@@ -131,14 +133,17 @@ class PostgresHook(DbApiHook):
         schema: str = None,
         include_constraints: bool = False,
     ):
-        random_hash = hashlib.sha256(os.urandom(128)).hexdigest()[:6]
-        date = dateutil.utils.today().strftime("%Y-%m-%d")
-        temp_name = f"_temp_{from_table}_{random_hash}_{date}"
+        if not temp_name:
+            random_hash = hashlib.sha256(os.urandom(128)).hexdigest()[:6]
+            date = dateutil.utils.today().strftime("%Y-%m-%d")
+            temp_name = f"_temp_{from_table}_{random_hash}_{date}"
+        if not schema:
+            schema = self.schema
         self.log.debug(
             f"temporary table requested, creating temporary table at {temp_name!r}"
         )
         table = self.duplicate_table(
-            from_table, temp_name, include_constraints=include_constraints
+            from_table, temp_name, include_constraints=include_constraints, schema=schema
         )
         return table
 
@@ -371,10 +376,6 @@ class PostgresHook(DbApiHook):
                 raise AirflowException(
                     f"Failed loading dataframes for table {table}:\n" f"{exc!r}"
                 )
-            else:
-                self.upsert(temp_table, target_table, upsert_params=templates_dict)
-            finally:
-                temp_table.drop(self.engine)
         return temp_table.name
 
     def dump(self, table: str, filepath: str) -> None:
