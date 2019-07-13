@@ -134,8 +134,8 @@ class PostgresHook(DbApiHook):
         include_constraints: bool = False,
     ):
         if not temp_name:
-            random_hash = hashlib.sha256(os.urandom(128)).hexdigest()[:6]
-            date = dateutil.utils.today().strftime("%Y-%m-%d")
+            random_hash = hashlib.sha256(os.urandom(128)).hexdigest()[:4]
+            date = dateutil.utils.today().strftime("%Y%m%d")
             temp_name = f"_temp_{from_table}_{random_hash}_{date}"
         if not schema:
             schema = self.schema
@@ -282,17 +282,22 @@ class PostgresHook(DbApiHook):
                 table=self.get_table_if_exists(table, schema=schema, engine=self.engine),
                 exclude=["id"],
             )
-        sql_args = {
-            "name": table,
-            "con": engine or conn,
-            "schema": schema,
-            "if_exists": "append",
-            "chunksize": chunksize,
-            "method": "multi",
-            "index": include_index,
-            "dtype": col_type_map,
-        }
-        df.to_sql(**sql_args)
+        # sql_args = {
+        #     "name": table,
+        #     "con": engine or conn,
+        #     "schema": schema,
+        #     "if_exists": "append",
+        #     "chunksize": chunksize,
+        #     "method": "multi",
+        #     "index": include_index,
+        #     "dtype": col_type_map,
+        # }
+        # df.to_sql(**sql_args)
+        output = io.StringIO()
+        sep = "\t"
+        df.to_csv(output, header=False, index=False, sep=sep, chunksize=chunksize)
+        output.seek(0)
+        self.bulk_load(table, output, schema=schema, conn=conn)
         return table
 
     def stream_csv_to_df(
@@ -438,7 +443,33 @@ class PostgresHook(DbApiHook):
                     writer.writerow(result)
         return filepath
 
-    def copy_expert(self, sql, filename, open=open):
+    @contextlib.contextmanager
+    def closed_conn_if_created(self, conn=None):
+        created = False
+        if not conn:
+            created = True
+            conn = self.get_conn()
+        try:
+            yield conn
+        finally:
+            if created:
+                conn.close()
+
+    @contextlib.contextmanager
+    def open_buffer_from_file(self, filename, open=open):
+        is_buffer = False
+        if isinstance(filename, io.StringIO):
+            is_buffer = True
+            f = filename
+        else:
+            f = open(filename, "r+")
+        try:
+            yield f
+        finally:
+            if not is_buffer and not f.closed:
+                f.close()
+
+    def copy_expert(self, sql, filename, open=open, conn=None):
         """
         Executes SQL using psycopg2 copy_expert method.
         Necessary to execute COPY command without access to a superuser.
@@ -449,22 +480,26 @@ class PostgresHook(DbApiHook):
         So if users want to be aware when the input file does not exist,
         they have to check its existence by themselves.
         """
-        if not os.path.isfile(filename):
+        if not isinstance(filename, io.StringIO) and not os.path.isfile(filename):
             with open(filename, "w"):
                 pass
 
-        with open(filename, "r+") as f:
-            with contextlib.closing(self.get_conn()) as conn:
+        with self.open_buffer_from_file(filename, open=open) as f:
+            with self.closed_conn_if_created(conn=conn) as conn:
                 with contextlib.closing(conn.cursor()) as cur:
                     cur.copy_expert(sql, f)
                     f.truncate(f.tell())
                     conn.commit()
 
-    def bulk_load(self, table, tmp_file):
+    def bulk_load(self, table, tmp_file, schema=None, conn=None):
         """
         Loads a tab-delimited file into a database table
         """
-        self.copy_expert("COPY {table} FROM STDIN".format(table=table), tmp_file)
+        if schema:
+            table = f"{schema}.{table}"
+        self.copy_expert(
+            "COPY {table} FROM STDIN".format(table=table), tmp_file, conn=conn
+        )
 
     def bulk_dump(self, table, tmp_file):
         """
