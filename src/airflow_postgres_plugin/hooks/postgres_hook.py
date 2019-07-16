@@ -8,12 +8,14 @@ import decimal
 import hashlib
 import io
 import os
-from typing import IO, Any, Dict, Generator, List, Optional, Type, Union
+from functools import reduce
+from typing import IO, Any, Dict, Generator, Iterator, List, Optional, Type, Union
 
 import dateutil.utils
 import pandas
 import postgres_copy
 import psycopg2
+import psycopg2.sql
 import sqlalchemy
 from airflow.exceptions import AirflowException
 from airflow.hooks.dbapi_hook import DbApiHook
@@ -270,6 +272,7 @@ class PostgresHook(DbApiHook):
         conn: Optional[psycopg2.extensions.connection] = None,
         col_type_map: Dict[str, sqlalchemy.sql.type_api.TypeEngine] = None,
         create_tables: bool = False,
+        column_map: Dict[str, str] = None,
     ) -> Optional[str]:
         if not schema:
             schema = self.schema
@@ -294,10 +297,24 @@ class PostgresHook(DbApiHook):
         # }
         # df.to_sql(**sql_args)
         output = io.StringIO()
-        sep = "\t"
-        df.to_csv(output, header=False, index=False, sep=sep, chunksize=chunksize)
+        df.to_csv(
+            output,
+            header=False,
+            index=False,
+            quoting=csv.QUOTE_MINIMAL,
+            chunksize=chunksize,
+        )
+        if column_map:
+            cols = [column_map.get(col, col) for col in df.columns if col != "id"]
+        else:
+            cols = [col for col in df.columns if col != "id"]
         output.seek(0)
-        self.bulk_load(table, output, schema=schema, conn=conn)
+        if not conn:
+            with contextlib.closing(self.get_conn()) as conn:
+                self.set_autocommit(conn, True)
+                self.bulk_load(table, output, schema=schema, conn=conn, columns=cols)
+        else:
+            self.bulk_load(table, output, schema=schema, conn=conn, columns=cols)
         return table
 
     def stream_csv_to_df(
@@ -311,6 +328,7 @@ class PostgresHook(DbApiHook):
         quoting: int = csv.QUOTE_MINIMAL,
         include_index: bool = False,
         col_type_map: Dict[str, Type] = None,
+        columns: List[str] = None,
     ) -> Generator[None, None, pandas.DataFrame]:
         read_kwargs = {
             "sep": sep,
@@ -321,15 +339,17 @@ class PostgresHook(DbApiHook):
             "quoting": quoting,
             "error_bad_lines": False,
             "warn_bad_lines": True,
+            "na_filter": False,
         }
+        if columns:
+            read_kwargs["usecols"] = columns
         if table is not None and not col_type_map:
             table_instance = self.get_table_if_exists(table, schema=schema)
             col_type_map = self.get_sqlalchemy_table_python_types(
                 table_instance, exclude=["id"]
             )
         if col_type_map:
-            read_kwargs["dtype"] = col_type_map
-            read_kwargs["usecols"] = list(col_type_map.keys())
+            read_kwargs["dtype"] = {k.lower(): v for k, v in col_type_map.items()}
         df_stream = pandas.read_csv(csv_file, **read_kwargs)
         return df_stream
 
@@ -355,6 +375,8 @@ class PostgresHook(DbApiHook):
         csv_python_types = self.get_sqlalchemy_table_python_types(
             target_table, exclude=["id"]
         )
+        columns = list(col_type_map.keys())
+        col_map = {k.lower(): k for k in col_type_map.keys()}
         df_stream_kwargs = {
             "schema": schema,
             "sep": sep,
@@ -363,6 +385,7 @@ class PostgresHook(DbApiHook):
             "quoting": quoting,
             "include_index": include_index,
             "col_type_map": csv_python_types,
+            "columns": [c.lower() for c in columns],
         }
         with contextlib.closing(self.get_conn()) as conn:
             self.set_autocommit(conn, True)
@@ -377,6 +400,7 @@ class PostgresHook(DbApiHook):
                         schema=schema,
                         col_type_map=col_type_map,
                         create_tables=create_tables,
+                        column_map=col_map,
                     )
             except Exception as exc:
                 raise AirflowException(
@@ -480,7 +504,10 @@ class PostgresHook(DbApiHook):
         So if users want to be aware when the input file does not exist,
         they have to check its existence by themselves.
         """
-        if not isinstance(filename, io.StringIO) and not os.path.isfile(filename):
+        if not (
+            isinstance(filename, (io.TextIOBase, StringIteratorIO))
+            or os.path.isfile(filename)
+        ):
             with open(filename, "w"):
                 pass
 
@@ -491,18 +518,61 @@ class PostgresHook(DbApiHook):
                     f.truncate(f.tell())
                     conn.commit()
 
-    def bulk_load(self, table, tmp_file, schema=None, conn=None):
+    def bulk_load(self, table, tmp_file, schema=None, conn=None, columns=None):
         """
         Loads a tab-delimited file into a database table
         """
         if schema:
             table = f"{schema}.{table}"
-        self.copy_expert(
-            "COPY {table} FROM STDIN".format(table=table), tmp_file, conn=conn
-        )
+        if not columns:
+            sql = "COPY {table} FROM STDIN".format(table=table)
+        else:
+            columns = [f'"{column}"' for column in columns]
+            sql = "COPY {table} ({columns}) FROM STDIN".format(
+                table=table, columns=", ".join(columns)
+            )
+        sql = f"{sql} CSV"
+
+        self.copy_expert(sql, tmp_file, conn=conn)
 
     def bulk_dump(self, table, tmp_file):
         """
         Dumps a database table into a tab-delimited file
         """
         self.copy_expert("COPY {table} TO STDOUT".format(table=table), tmp_file)
+
+
+class StringIteratorIO(io.TextIOBase):
+    def __init__(self, iter: Iterator[str]):
+        self._iter = iter
+        self._buff = ""
+
+    def readable(self) -> bool:
+        return True
+
+    def _read1(self, n: Optional[int] = None) -> str:
+        while not self._buff:
+            try:
+                self._buff = next(self._iter)
+            except StopIteration:
+                break
+        ret = self._buff[:n]
+        self._buff = self._buff[len(ret) :]
+        return ret
+
+    def read(self, n: Optional[int] = None) -> str:
+        line = []
+        if n is None or n < 0:
+            while True:
+                m = self._read1()
+                if not m:
+                    break
+                line.append(m)
+        else:
+            while n > 0:
+                m = self._read1(n)
+                if not m:
+                    break
+                n -= len(m)
+                line.append(m)
+        return "".join(line)
